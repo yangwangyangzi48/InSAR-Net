@@ -57,3 +57,11 @@ https://github.com/yangwangyangzi48/InSAR-Net.git
 ## Keywords
 
 InSAR; phase filtering; deep convolutional neural network; physical modeling; data-driven learning; phase unwrapping; low-coherence areas; synthetic aperture radar
+
+## Model
+<img width="849" height="651" alt="image" src="https://github.com/user-attachments/assets/6f86f29a-9405-43fa-a000-6682f74d525f" />
+## results
+<img width="837" height="968" alt="image" src="https://github.com/user-attachments/assets/c2402d98-88c8-44de-90d9-3854a60ae9f3" />
+<img width="859" height="580" alt="image" src="https://github.com/user-attachments/assets/36c239e7-441d-4b6e-8d85-5180b58ef007" />
+
+
