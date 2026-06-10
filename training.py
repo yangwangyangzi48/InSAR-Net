@@ -1,134 +1,64 @@
-"""Training routines."""
-
-from __future__ import annotations
-
 import os
-
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-
-from .config import PhaseFilterConfig
-from .losses import improved_phase_loss2
-from .utils import logger
+from .losses import phase_consistency_loss
+from .metrics import phase_mae, phase_rmse
 
 
-def compile_model(model: tf.keras.Model, config: PhaseFilterConfig) -> tf.keras.Model:
-    """Compile model with Adam and phase-aware loss."""
-    optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
-    model.compile(optimizer=optimizer, loss=improved_phase_loss2(), metrics=["mae"])
-    logger.info("Model compiled with improved phase loss.")
+def build_optimizer(config):
+    return tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
+
+
+def compile_model(model, config):
+    model.compile(optimizer=build_optimizer(config), loss=phase_consistency_loss(config.lambda_cmp, config.lambda_ang, config.lambda_grad, config.lambda_cons), metrics=[phase_mae, phase_rmse])
     return model
 
 
-def cosine_decay_with_warmup(total_epochs: int, warmup_epochs: int, initial_lr: float, min_lr: float):
-    """Cosine decay learning-rate scheduler with linear warmup."""
-    warmup_epochs = max(1, int(warmup_epochs))
-    total_epochs = max(warmup_epochs + 1, int(total_epochs))
-
-    def lr_fn(epoch: int) -> float:
+def cosine_schedule(total_epochs, warmup_epochs, initial_lr, min_lr):
+    def fn(epoch):
         if epoch < warmup_epochs:
-            return float(initial_lr * (epoch + 1) / warmup_epochs)
-        progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-        cosine_decay = 0.5 * (1.0 + np.cos(np.pi * progress))
-        return float((initial_lr - min_lr) * cosine_decay + min_lr)
-
-    return lr_fn
+            return initial_lr * float(epoch + 1) / float(max(warmup_epochs, 1))
+        progress = float(epoch - warmup_epochs) / float(max(total_epochs - warmup_epochs, 1))
+        return min_lr + 0.5 * (initial_lr - min_lr) * (1.0 + np.cos(np.pi * progress))
+    return fn
 
 
-def train_model(
-    model: tf.keras.Model,
-    train_dataset,
-    val_dataset,
-    config: PhaseFilterConfig,
-    model_dir: str,
-    initial_epoch: int = 0,
-    resume_model: str | None = None,
-) -> tuple[tf.keras.Model, tf.keras.callbacks.History]:
-    """Train or resume the model."""
-    if resume_model and os.path.exists(resume_model):
-        logger.info("Loading existing model from %s", resume_model)
-        model = tf.keras.models.load_model(resume_model, compile=False)
-        model = compile_model(model, config)
-    elif resume_model:
-        logger.warning("Resume model not found: %s. Training from scratch.", resume_model)
+def callbacks(config, paths):
+    lr_fn = cosine_schedule(config.epochs, max(int(config.epochs * 0.06), 1), config.learning_rate, config.min_learning_rate)
+    return [
+        tf.keras.callbacks.LearningRateScheduler(lr_fn),
+        tf.keras.callbacks.ModelCheckpoint(os.path.join(paths["models"], "best_model.h5"), monitor="val_loss", save_best_only=True, mode="min"),
+        tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True),
+        tf.keras.callbacks.CSVLogger(os.path.join(paths["logs"], "history.csv")),
+        tf.keras.callbacks.TensorBoard(log_dir=paths["logs"])
+    ], lr_fn
 
-    warmup_epochs = int(config.warmup_ratio * config.epochs)
-    lr_schedule_fn = cosine_decay_with_warmup(
-        config.epochs, warmup_epochs, config.learning_rate, config.min_learning_rate
-    )
 
-    callbacks = [
-        tf.keras.callbacks.LearningRateScheduler(lr_schedule_fn),
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(model_dir, "best_model.h5"),
-            save_best_only=True,
-            monitor="val_loss",
-            mode="min",
-            verbose=1,
-        ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=config.early_stopping_patience,
-            restore_best_weights=True,
-            verbose=1,
-        ),
-        tf.keras.callbacks.TensorBoard(
-            log_dir=config.tensorboard_log_dir,
-            histogram_freq=1,
-            write_graph=True,
-            update_freq="epoch",
-        ),
-    ]
-
-    history = model.fit(
-        train_dataset,
-        validation_data=val_dataset,
-        epochs=config.epochs,
-        initial_epoch=initial_epoch,
-        callbacks=callbacks,
-        verbose=1,
-    )
-
-    model.save(os.path.join(model_dir, "final_model.h5"))
+def train(model, train_ds, val_ds, config, paths):
+    cbs, lr_fn = callbacks(config, paths)
+    history = model.fit(train_ds, validation_data=val_ds, epochs=config.epochs, callbacks=cbs)
+    model.save(os.path.join(paths["models"], "final_model.h5"))
+    plot_history(history, lr_fn, config.epochs, paths["figures"])
     return model, history
 
 
-def plot_training_history(history, evaluation_dir: str, config: PhaseFilterConfig) -> None:
-    """Save loss, MAE, and learning-rate curves."""
-    os.makedirs(evaluation_dir, exist_ok=True)
-    warmup_epochs = int(config.warmup_ratio * config.epochs)
-    lr_schedule_fn = cosine_decay_with_warmup(
-        config.epochs, warmup_epochs, config.learning_rate, config.min_learning_rate
-    )
-
-    plt.figure(figsize=(15, 5))
-
+def plot_history(history, lr_fn, epochs, out_dir):
+    keys = list(history.history.keys())
+    plt.figure(figsize=(12, 4))
     plt.subplot(1, 3, 1)
-    plt.plot(history.history.get("loss", []), label="Training Loss")
-    plt.plot(history.history.get("val_loss", []), label="Validation Loss")
-    plt.title("Loss History")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
+    plt.plot(history.history.get("loss", []), label="loss")
+    plt.plot(history.history.get("val_loss", []), label="val_loss")
     plt.legend()
-
     plt.subplot(1, 3, 2)
-    plt.plot(history.history.get("mae", []), label="Training MAE")
-    plt.plot(history.history.get("val_mae", []), label="Validation MAE")
-    plt.title("MAE History")
-    plt.xlabel("Epoch")
-    plt.ylabel("MAE")
+    if "phase_rmse" in keys:
+        plt.plot(history.history.get("phase_rmse", []), label="phase_rmse")
+        plt.plot(history.history.get("val_phase_rmse", []), label="val_phase_rmse")
     plt.legend()
-
-    lr_schedule = [lr_schedule_fn(epoch) for epoch in range(config.epochs)]
     plt.subplot(1, 3, 3)
-    plt.plot(lr_schedule, label="Learning Rate")
-    plt.title("Learning Rate Schedule")
-    plt.xlabel("Epoch")
-    plt.ylabel("Learning Rate")
+    plt.plot([lr_fn(i) for i in range(epochs)], label="lr")
     plt.yscale("log")
     plt.legend()
-
     plt.tight_layout()
-    plt.savefig(os.path.join(evaluation_dir, "training_history.png"), dpi=200)
+    plt.savefig(os.path.join(out_dir, "training_history.png"), dpi=200)
     plt.close()

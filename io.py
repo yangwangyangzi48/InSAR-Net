@@ -1,78 +1,80 @@
-"""TIF input/output utilities."""
-
-from __future__ import annotations
-
 import glob
 import os
-from typing import Iterable
-
 import numpy as np
 import tifffile as tiff
 
-from .utils import logger
 
-
-def list_tif_files(folder: str) -> list[str]:
-    """List tif/tiff files in a folder."""
-    files: list[str] = []
-    for ext in ("*.tif", "*.tiff"):
-        files.extend(glob.glob(os.path.join(folder, ext)))
+def list_tifs(directory):
+    files = []
+    for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
+        files.extend(glob.glob(os.path.join(directory, ext)))
     return sorted(files)
 
 
-def load_phase_tif(path: str) -> np.ndarray:
-    """Load a single-band phase TIF as ``float32``.
-
-    Multi-band inputs are reduced to the first band. NaN and Inf values are
-    converted to 0 to keep TensorFlow pipelines stable.
-    """
-    image = tiff.imread(path).astype(np.float32)
-
-    if image.ndim > 2:
-        if image.shape[-1] == 1:
-            image = np.squeeze(image, axis=-1)
-        else:
-            image = image[..., 0]
-
-    image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
-    return image.astype(np.float32)
+def basename_key(path):
+    name = os.path.basename(path)
+    return os.path.splitext(name)[0]
 
 
-def save_phase_tif(path: str, phase: np.ndarray) -> None:
-    """Save a phase array to TIF."""
+def match_triplets(slc1_dir, slc2_dir, target_dir, max_files=0):
+    slc1 = {basename_key(p): p for p in list_tifs(slc1_dir)}
+    slc2 = {basename_key(p): p for p in list_tifs(slc2_dir)}
+    target = {basename_key(p): p for p in list_tifs(target_dir)}
+    keys = sorted(set(slc1).intersection(slc2).intersection(target))
+    if max_files and max_files > 0:
+        keys = keys[:max_files]
+    return [(slc1[k], slc2[k], target[k]) for k in keys]
+
+
+def read_tif(path):
+    arr = tiff.imread(path).astype(np.float32)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return arr
+
+
+def write_tif(path, arr):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tiff.imwrite(path, phase.astype(np.float32))
+    tiff.imwrite(path, arr.astype(np.float32))
 
 
-def load_data_pairs(noise_dir: str, clean_dir: str, max_files: int | None = None) -> tuple[list[str], list[str]]:
-    """Load matched noisy/clean TIF paths by sorted order.
-
-    This follows the behavior of the original script. If exact filename matching
-    is required, rename files consistently or customize this function.
-    """
-    logger.info("Loading data from %s and %s", noise_dir, clean_dir)
-
-    noise_files = list_tif_files(noise_dir)
-    clean_files = list_tif_files(clean_dir)
-
-    if not noise_files:
-        raise FileNotFoundError(f"No tif files found in noisy directory: {noise_dir}")
-    if not clean_files:
-        raise FileNotFoundError(f"No tif files found in clean directory: {clean_dir}")
-
-    pair_count = min(len(noise_files), len(clean_files))
-    if max_files is not None:
-        pair_count = min(pair_count, int(max_files))
-
-    noise_files = noise_files[:pair_count]
-    clean_files = clean_files[:pair_count]
-
-    logger.info("Loaded %d matched InSAR image pairs", pair_count)
-    return noise_files, clean_files
+def read_complex_tif(path):
+    arr = read_tif(path)
+    if arr.ndim == 2:
+        real = arr
+        imag = np.zeros_like(arr, dtype=np.float32)
+    elif arr.ndim == 3 and arr.shape[-1] >= 2:
+        real = arr[..., 0]
+        imag = arr[..., 1]
+    elif arr.ndim == 3 and arr.shape[0] >= 2:
+        real = arr[0]
+        imag = arr[1]
+    else:
+        arr = np.squeeze(arr)
+        real = arr.astype(np.float32)
+        imag = np.zeros_like(real, dtype=np.float32)
+    return real.astype(np.float32), imag.astype(np.float32)
 
 
-def ensure_same_length(*items: Iterable[object]) -> None:
-    """Validate that several collections have the same length."""
-    lengths = [len(x) for x in items]
-    if len(set(lengths)) != 1:
-        raise ValueError(f"Input collections must have the same length, got {lengths}")
+def read_phase_tif(path):
+    arr = read_tif(path)
+    if arr.ndim > 2:
+        arr = np.squeeze(arr)
+        if arr.ndim > 2:
+            arr = arr[..., 0]
+    return arr.astype(np.float32)
+
+
+def center_crop_or_pad(arr, size):
+    h, w = arr.shape[:2]
+    if h >= size and w >= size:
+        r0 = (h - size) // 2
+        c0 = (w - size) // 2
+        return arr[r0:r0 + size, c0:c0 + size, ...]
+    out_shape = (size, size) + arr.shape[2:]
+    out = np.zeros(out_shape, dtype=arr.dtype)
+    r0 = max((size - h) // 2, 0)
+    c0 = max((size - w) // 2, 0)
+    rr = min(h, size)
+    cc = min(w, size)
+    out[r0:r0 + rr, c0:c0 + cc, ...] = arr[:rr, :cc, ...]
+    return out

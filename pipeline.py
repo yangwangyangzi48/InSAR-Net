@@ -1,83 +1,35 @@
-"""End-to-end training pipeline."""
-
-from __future__ import annotations
-
-import json
 import os
-
-from sklearn.model_selection import train_test_split
-
-from .config import PhaseFilterConfig, RunPaths
-from .dataset import create_dataset
-from .evaluation import evaluate_model
-from .io import load_data_pairs
-from .models import build_improved_phase_filter_model
-from .training import compile_model, plot_training_history, train_model
-from .utils import logger, set_global_seed
-from .visualization import visualize_results
+import tensorflow as tf
+from .config import TrainConfig, apply_environment_defaults
+from .data import build_datasets
+from .evaluation import evaluate_dataset, save_metrics
+from .model import build_insarnet, custom_objects
+from .training import compile_model, train
+from .utils import get_logger, make_run_dirs, save_json, set_seed
 
 
-def run_training_pipeline(
-    config: PhaseFilterConfig,
-    paths: RunPaths,
-    resume_model: str | None = None,
-    visualize: bool = True,
-):
-    """Run data loading, training, evaluation, and visualization."""
-    set_global_seed(config.random_seed)
-
-    noise_files, clean_files = load_data_pairs(paths.noise_dir, paths.clean_dir, max_files=config.max_files)
-
-    train_noise, test_noise, train_clean, test_clean = train_test_split(
-        noise_files,
-        clean_files,
-        test_size=config.test_split,
-        random_state=config.random_seed,
-    )
-
-    val_ratio = config.validation_split / max(1e-8, 1.0 - config.test_split)
-    train_noise, val_noise, train_clean, val_clean = train_test_split(
-        train_noise,
-        train_clean,
-        test_size=val_ratio,
-        random_state=config.random_seed,
-    )
-
-    logger.info(
-        "Data split: %d training, %d validation, %d test samples",
-        len(train_noise),
-        len(val_noise),
-        len(test_noise),
-    )
-
-    train_dataset = create_dataset(train_noise, train_clean, config, is_training=True)
-    val_dataset = create_dataset(val_noise, val_clean, config, is_training=False)
-    test_dataset = create_dataset(test_noise, test_clean, config, is_training=False)
-
-    model = build_improved_phase_filter_model(
-        image_size=config.image_size,
-        input_channels=config.input_channels,
-    )
+def run(config):
+    logger = get_logger()
+    set_seed(config.seed)
+    if config.mixed_precision:
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
+    paths = make_run_dirs(config.output_dir)
+    save_json(config.to_dict(), os.path.join(paths["root"], "config.json"))
+    train_ds, val_ds, test_ds, train_files, val_files, test_files = build_datasets(config)
+    logger.info("Training samples: %d", len(train_files))
+    logger.info("Validation samples: %d", len(val_files))
+    logger.info("Test samples: %d", len(test_files))
+    if config.resume_model:
+        model = tf.keras.models.load_model(config.resume_model, compile=False, custom_objects=custom_objects())
+    else:
+        model = build_insarnet(config.image_size, config.base_channels, config.fpn_channels, config.rdb_layers, config.rdb_growth_rate)
     model = compile_model(model, config)
-    model.summary()
+    model, history = train(model, train_ds, val_ds, config, paths)
+    metrics = evaluate_dataset(model, test_ds)
+    save_metrics(metrics, os.path.join(paths["metrics"], "test_metrics.json"))
+    logger.info("Results saved to %s", paths["root"])
+    return model, metrics, paths
 
-    model, history = train_model(
-        model,
-        train_dataset,
-        val_dataset,
-        config=config,
-        model_dir=paths.model_dir,
-        resume_model=resume_model,
-    )
 
-    plot_training_history(history, paths.evaluation_dir, config)
-    metrics = evaluate_model(model, test_dataset)
-
-    with open(os.path.join(paths.evaluation_dir, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=4, ensure_ascii=False)
-
-    if visualize:
-        visualize_results(model, test_noise, test_clean, paths.evaluation_dir, config, num_samples=5)
-
-    logger.info("InSAR phase filtering results saved to %s", paths.output_dir)
-    return model, metrics
+def default_run():
+    return run(apply_environment_defaults(TrainConfig()))

@@ -1,36 +1,47 @@
-"""General utilities."""
-
-from __future__ import annotations
-
+import json
 import logging
 import os
 import random
-
+import time
 import numpy as np
+import tensorflow as tf
 
 
-def setup_logger(name: str = "insar_filter", level: int = logging.INFO) -> logging.Logger:
-    """Configure and return a project logger."""
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-        logger.addHandler(handler)
-    logger.setLevel(level)
-    return logger
+def get_logger(name="insarnet"):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    return logging.getLogger(name)
 
 
-def set_global_seed(seed: int) -> None:
-    """Set Python, NumPy, and TensorFlow seeds when TensorFlow is available."""
+def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    try:
-        import tensorflow as tf
-
-        tf.random.set_seed(seed)
-    except Exception:
-        pass
+    tf.random.set_seed(seed)
 
 
-logger = setup_logger()
+def timestamp():
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def make_run_dirs(output_dir):
+    root = os.path.join(output_dir, "run_" + timestamp())
+    paths = {
+        "root": root,
+        "models": os.path.join(root, "models"),
+        "logs": os.path.join(root, "logs"),
+        "figures": os.path.join(root, "figures"),
+        "predictions": os.path.join(root, "predictions"),
+        "metrics": os.path.join(root, "metrics")
+    }
+    for path in paths.values():
+        os.makedirs(path, exist_ok=True)
+    return paths
+
+
+def save_json(data, path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
